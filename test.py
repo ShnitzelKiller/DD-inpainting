@@ -18,14 +18,15 @@ parser.add_argument('--image_height', type=int, default=256)
 parser.add_argument('--suffix', type=str, default='_N')
 parser.add_argument('--mask_root', type=str, default='./masks')
 parser.add_argument('--out_file', type=str, default='result.jpg')
+parser.add_argument('--device', type=str, default='cuda')
 
 args = parser.parse_args()
 
-device = torch.device('cuda')
+device = torch.device(args.device)
 
 size = (args.image_height, args.image_width)
 
-dataset_val = DDDataset(args.root, (args.image_height,args.image_width),insuffixes = [args.suffix], masks=[(args.mask_root, '_objectmask.png')], train=False)
+dataset_val = DDDataset(args.root, (args.image_height,args.image_width),insuffixes = [args.suffix], masks=args.mask_root, train=False, auto_resize=False, random_masks=True)
 
 model = PConvUNet().to(device)
 load_ckpt(args.snapshot, [('model', model)])
