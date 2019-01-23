@@ -2,11 +2,12 @@ import torch
 from torchvision.utils import make_grid
 from torchvision.utils import save_image
 
-from util.image import unnormalize
+from util.image import unnormalize, gamma_correct, levels
+from random import randint
 
-
-def evaluate(model, dataset, device, filename):
-    image, mask, gt = zip(*[dataset[i] for i in range(8)])
+def evaluate(model, dataset, device, filename, gamma=1, exposure=1, black=0.0, white=1.0, random=False):
+    n = len(dataset)
+    image, mask, gt = zip(*[dataset[randint(0, n-1) if random else i] for i in range(8)])
     #print('image shape: ',image[0].shape)
     if image[0].shape[0] == 4:
         use_guide = True
@@ -29,6 +30,6 @@ def evaluate(model, dataset, device, filename):
     
 
     grid = make_grid(
-        torch.cat((unnormalize(image[:,0:3,:,:]), mask[:,0:3,:,:], unnormalize(output[:,0:3,:,:]),
-                   unnormalize(output_comp[:,0:3,:,:]), unnormalize(gt[:,0:3,:,:])), dim=0))
+        torch.cat((levels(gamma_correct(unnormalize(image[:,0:3,:,:]), gamma, exposure), black, white), mask[:,0:3,:,:], levels(gamma_correct(unnormalize(output[:,0:3,:,:]), gamma, exposure), black, white),
+                   levels(gamma_correct(unnormalize(output_comp[:,0:3,:,:]), gamma, exposure), black, white), levels(gamma_correct(unnormalize(gt[:,0:3,:,:]), gamma, exposure), black, white)), dim=0))
     save_image(grid, filename)

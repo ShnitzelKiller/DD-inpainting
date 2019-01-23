@@ -60,8 +60,14 @@ parser.add_argument('--image_size', type=int, default=256)
 parser.add_argument('--resume', type=str)
 parser.add_argument('--finetune', action='store_true')
 parser.add_argument('--random_masks', type=str, default='false')
+
+parser.add_argument('--gamma', type=float, default=1.5)
+parser.add_argument('--exposure', type=float, default=1)
+parser.add_argument('--white_level', type=float, default=1.0)
+parser.add_argument('--black_level', type=float, default=0.0)
 args = parser.parse_args()
 random_masks = str2bool(args.random_masks)
+use_depth = args.depth_root is not None
 
 torch.backends.cudnn.benchmark = True
 device = torch.device('cuda')
@@ -85,8 +91,8 @@ print(args)
 
 masks = args.mask_root if random_masks else [(args.mask_root, '_objectmask.png')]
 
-datasets = [DDDataset(args.root, size, crop=True, insuffixes = [args.suffix], masks=masks, train=train_flag, random_masks=random_masks, depth_map=(args.depth_root, '_WO.exr'), auto_resize=not random_masks) for train_flag in [True, False]]
-dataset_train, dataset_val = datasets
+dataset_train, dataset_val = [DDDataset(args.root, size, crop=True, insuffixes = [args.suffix], masks=masks, train=train_flag, random_masks=random_masks, depth_map=(args.depth_root, '_WO.exr') if use_depth else None, auto_resize=not random_masks) for train_flag in [True, False]]
+
 print('train size:', len(dataset_train))
 print('val size:', len(dataset_val))
 print('dataset shapes:')
@@ -98,7 +104,7 @@ iterator_train = iter(data.DataLoader(
     sampler=InfiniteSampler(len(dataset_train)),
     num_workers=args.n_threads))
 print(len(dataset_train))
-model = PConvUNet(input_guides=1 if args.depth_root is not None else 0).to(device)
+model = PConvUNet(input_guides=1 if use_depth else 0).to(device)
 
 if args.finetune:
     lr = args.lr_finetune
@@ -148,6 +154,6 @@ for i in tqdm(range(start_iter, args.max_iter)):
     if (i + 1) % args.vis_interval == 0:
         model.eval()
         evaluate(model, dataset_val, device,
-                 '{:s}/images/test_{:d}.jpg'.format(args.save_dir, i + 1))
+                 '{:s}/images/test_{:d}.jpg'.format(args.save_dir, i + 1), gamma=args.gamma, exposure=args.exposure, black=args.black_level, white=args.white_level)
 
 writer.close()
