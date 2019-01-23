@@ -41,8 +41,9 @@ class DDDataset(torch.utils.data.Dataset):
     def __init__(self, path, img_size=None, crop=True, xf=None, condition=None, 
                  insuffixes = ['_Y.exr', '_ALL.exr', '_WO.exr'], 
                  outsuffixes = None, masks = ['_objectmask.png', '_planemask.png'], outsuffix='_N.exr',
-                 postprocess=None, train=True, random_masks=False, auto_resize=False, depth_map=None, depth_maps=None):
+                 postprocess=None, train=True, random_masks=False, auto_resize=False, depth_map=None, depth_maps=None, debug=False):
         self.suffixes = [(path, sfx)  if isinstance(sfx, str) else sfx for sfx in insuffixes]
+        self.debug = debug
         self.needs_update = True
         self.auto_resize = auto_resize
         if outsuffixes is None:
@@ -98,15 +99,16 @@ class DDDataset(torch.utils.data.Dataset):
         if condition is not None:
             self.files = list(filter(condition, self.files))
         
-        self.filenames = {ext : [d.name for d in os.scandir(basedir) if d.name.split('_')[0] in self.files and d.name.endswith(ext)] for basedir,ext in extensions}
+        self.filenames = {ext : [d.name for d in os.scandir(basedir) if d.name.endswith(ext) and d.name.split('_')[0] in self.files] for basedir,ext in extensions}
         for ext in self.filenames:
             self.filenames[ext].sort()
-        for sets in zip(*[self.filenames[ext] for basedir,ext in extensions]):
-            prefix = sets[0].split('_')[0]
-            for name in sets:
-                if name.split('_')[0] != prefix:
-                    print('prefixes: {} and {}'.format(prefix, name.split('_')[0]))
-                    raise ValueError('dataset corrupt')
+        if self.debug:
+            for sets in zip(*[self.filenames[ext] for basedir,ext in extensions]):
+                prefix = sets[0].split('_')[0]
+                for name in sets:
+                    if name.split('_')[0] != prefix:
+                        print('prefixes: {} and {}'.format(prefix, name.split('_')[0]))
+                        raise ValueError('dataset corrupt')
 
         n = len(self.files)
         print("total files:", n)
@@ -156,19 +158,31 @@ class DDDataset(torch.utils.data.Dataset):
     def __getitem__(self,i):
         dilate = lambda im: im.filter(ImageFilter.MinFilter(5))
         p = [path + os.sep + self.filenames[sfx][i] for path,sfx in self.suffixes]
-
+        if self.debug:
+            prefix = p[0].split('/')[-1].split('_')[0]
+            for ps, suff in zip(p, self.suffixes):
+                if not ps.endswith(suff):
+                    raise ValueError('invalid p entry: {}'.format(ps))
         if self.random_masks:
             m = [self.masks[random.randint(0, self.N_mask-1)]]
             #print('using mask',m)
         else:
             m = [path + os.sep + self.filenames[sfx][i] for path,sfx in self.masks]
+        if self.debug:
+            for ms, suff in zip(m, self.masks):
+                if not ms.split('/')[-1].startswith(prefix) or not ms.endswith(suff):
+                    raise ValueError('invalid m entry: {} (prefix {}, index {})'.format(ms, prefix, i))
         if self.depthsuffixes:
             #print(self.depthsuffixes)
             d = [path + os.sep + self.filenames[sfx][i] for path,sfx in self.depthsuffixes]
-            print('d',d)
+            if self.debug:
+                for ds, suff in zip(d, self.depthsuffixes):
+                    if not ds.split('/')[-1].startswith(prefix) or not ds.endswith(suff):
+                        raise ValueError('invalid d entry: {} (prefix {})'.format(ds, prefix))
+            #print('d',d)
         #o = [path + os.sep + self.files[i] + sfx for path,sfx in self.outsuffixes]
-        print('p',p)
-        print('m',m)
+        #print('p',p)
+        #print('m',m)
         #print('o',o)
         ims = [self.preprocess(loader(i)) for i in p]
         masks = [self.preprocess(loader(i))[0:1] for i in m] #can also dilate with loader(i, [dilate])

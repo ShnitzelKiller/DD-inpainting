@@ -15,6 +15,7 @@ from net import VGG16FeatureExtractor
 #from places2 import Places2
 from util.io import load_ckpt
 from util.io import save_ckpt
+from util.io import str2bool
 from dataset import DDDataset
 
 class InfiniteSampler(data.sampler.Sampler):
@@ -58,8 +59,9 @@ parser.add_argument('--log_interval', type=int, default=10)
 parser.add_argument('--image_size', type=int, default=256)
 parser.add_argument('--resume', type=str)
 parser.add_argument('--finetune', action='store_true')
-parser.add_argument('--random_masks', type=bool, default=False)
+parser.add_argument('--random_masks', type=str, default='false')
 args = parser.parse_args()
+random_masks = str2bool(args.random_masks)
 
 torch.backends.cudnn.benchmark = True
 device = torch.device('cuda')
@@ -81,9 +83,9 @@ mask_tf = transforms.Compose(
 
 print(args)
 
-masks = args.mask_root if args.random_masks else [(args.mask_root, '_objectmask.png')]
+masks = args.mask_root if random_masks else [(args.mask_root, '_objectmask.png')]
 
-datasets = [DDDataset(args.root, size, crop=True, insuffixes = [args.suffix], masks=masks, train=train_flag, random_masks=args.random_masks, depth_map=(args.depth_root, '_WO.exr'), auto_resize=not args.random_masks) for train_flag in [True, False]]
+datasets = [DDDataset(args.root, size, crop=True, insuffixes = [args.suffix], masks=masks, train=train_flag, random_masks=random_masks, depth_map=(args.depth_root, '_WO.exr'), auto_resize=not random_masks) for train_flag in [True, False]]
 dataset_train, dataset_val = datasets
 print('train size:', len(dataset_train))
 print('val size:', len(dataset_val))
