@@ -41,7 +41,7 @@ class DDDataset(torch.utils.data.Dataset):
     def __init__(self, path, img_size=None, crop=True, xf=None, condition=None, 
                  insuffixes = ['_Y.exr', '_ALL.exr', '_WO.exr'], 
                  outsuffixes = None, masks = ['_objectmask.png', '_planemask.png'], outsuffix='_N.exr',
-                 postprocess=None, train=True, random_masks=False, auto_resize=False):
+                 postprocess=None, train=True, random_masks=False, auto_resize=False, depth_map=None, depth_maps=None):
         self.suffixes = [(path, sfx)  if isinstance(sfx, str) else sfx for sfx in insuffixes]
         self.needs_update = True
         self.auto_resize = auto_resize
@@ -50,6 +50,14 @@ class DDDataset(torch.utils.data.Dataset):
         else:
             self.outsuffixes = outsuffixes
         self.outsuffixes = [(path, sfx) if isinstance(sfx, str) else sfx for sfx in self.outsuffixes]
+        if depth_map is not None:
+            self.depthsuffixes = [depth_map]
+        elif depth_maps is not None:
+            self.depthsuffixes = depth_maps
+        else:
+            self.depthsuffixes = None
+        if self.depthsuffixes is not None:
+            self.depthsuffixes = [(path, sfx) if isinstance(sfx, str) else sfx for sfx in self.depthsuffixes]
         self.random_masks = random_masks
         if random_masks:
             if isinstance(masks, str):
@@ -60,7 +68,7 @@ class DDDataset(torch.utils.data.Dataset):
             else:
                 self.masks = [m for m in itertools.chain.from_iterable([[f.path for f in os.scandir(path)] for path in masks])]
         else:
-            self.masks = [(path, sfx)  if isinstance(sfx, str) else sfx for sfx in masks]
+            self.masks = [(path, sfx) if isinstance(sfx, str) else sfx for sfx in masks]
         self.img_size = img_size
         self.crop = crop
         self.transform = xf
@@ -68,6 +76,9 @@ class DDDataset(torch.utils.data.Dataset):
         extensions = self.suffixes
         if not self.random_masks:
             extensions += self.masks
+        if depth_map:
+            extensions += self.depthsuffixes
+            
         for basedir,ext in extensions:
             n = 0
             for x in os.scandir(basedir):
@@ -77,12 +88,26 @@ class DDDataset(torch.utils.data.Dataset):
             #print('count matching ext',ext,':', len(currfiles))
         if sys.version_info >= (3, 5):
             # Faster and available in Python 3.5 and above
-            files = [set([d.name[:-len(ext)] for d in os.scandir(basedir) if d.name.endswith(ext)]) for basedir,ext in extensions]
+            files = [{d.name.split("_")[0] for d in os.scandir(basedir) if d.name.endswith(ext)} for basedir,ext in extensions]
         else:
-            files = [set([d[:-len(ext)] for d in os.listdir(basedir) if d.endswith(ext)]) for basedir,ext in extensions]
+            files = [set([d.split("_")[0] for d in os.listdir(basedir) if d.endswith(ext)]) for basedir,ext in extensions]
+        print('files with requested extensions:')
+        for i, pair in enumerate(extensions):
+            print('{} ({}): {}'.format(pair[0], pair[1], len(files[i])))
         self.files = list(reduce(lambda x, y: y.intersection(x), files))
         if condition is not None:
             self.files = list(filter(condition, self.files))
+        
+        self.filenames = {ext : [d.name for d in os.scandir(basedir) if d.name.split('_')[0] in self.files and d.name.endswith(ext)] for basedir,ext in extensions}
+        for ext in self.filenames:
+            self.filenames[ext].sort()
+        for sets in zip(*[self.filenames[ext] for basedir,ext in extensions]):
+            prefix = sets[0].split('_')[0]
+            for name in sets:
+                if name.split('_')[0] != prefix:
+                    print('prefixes: {} and {}'.format(prefix, name.split('_')[0]))
+                    raise ValueError('dataset corrupt')
+
         n = len(self.files)
         print("total files:", n)
         split = n // 10
@@ -90,7 +115,7 @@ class DDDataset(torch.utils.data.Dataset):
             self.files = self.files[split:]
         else:
             self.files = self.files[:split]
-        #print("files:", len(self.files))
+        print("files in subset:", len(self.files))
     
     def preprocess(self, im):
         im = transforms.ToTensor()(im)
@@ -130,18 +155,26 @@ class DDDataset(torch.utils.data.Dataset):
     
     def __getitem__(self,i):
         dilate = lambda im: im.filter(ImageFilter.MinFilter(5))
-        p = [path + os.sep + self.files[i] + sfx for path,sfx in self.suffixes]
+        p = [path + os.sep + self.filenames[sfx][i] for path,sfx in self.suffixes]
+
         if self.random_masks:
             m = [self.masks[random.randint(0, self.N_mask-1)]]
             #print('using mask',m)
         else:
-            m = [path + os.sep + self.files[i] + sfx for path,sfx in self.masks]
+            m = [path + os.sep + self.filenames[sfx][i] for path,sfx in self.masks]
+        if self.depthsuffixes:
+            #print(self.depthsuffixes)
+            d = [path + os.sep + self.filenames[sfx][i] for path,sfx in self.depthsuffixes]
+            print('d',d)
         #o = [path + os.sep + self.files[i] + sfx for path,sfx in self.outsuffixes]
-        #print('p',p)
-        #print('m',m)
+        print('p',p)
+        print('m',m)
         #print('o',o)
         ims = [self.preprocess(loader(i)) for i in p]
         masks = [self.preprocess(loader(i))[0:1] for i in m] #can also dilate with loader(i, [dilate])
+        if self.depthsuffixes:
+            depthmaps = [self.preprocess(loader(i))[0:1] for i in d]
+        
         #imo = [self.preprocess(loader(i)) for i in o]
         if self.postprocess is not None:
             #return makeDict([tensor.unsqueeze(0) for tensor in self.postprocess(torch.cat(ims+masks, 0), torch.cat(imo, 0))])
@@ -154,7 +187,12 @@ class DDDataset(torch.utils.data.Dataset):
             #print('images size:',allimages.shape)
             
             #TODO: Decide what suffixes to consider ground truth/input image for inpainting (for now use _N (comes after "lighting correction" stage)
-            return image * allmasks, allmasks, image #, torch.cat(imo, 0).unsqueeze(0)
+            gt = image
+            image = image * allmasks
+            if self.depthsuffixes:
+                depthmap = depthmaps[0]
+                image = torch.cat([image, depthmap], 0)
+            return image, allmasks, gt #, torch.cat(imo, 0).unsqueeze(0)
 
 def parseDDFilename(path):
     s = path.split("_")

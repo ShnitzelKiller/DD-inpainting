@@ -44,6 +44,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--root', type=str, default='/srv/datasets/Places2')
 parser.add_argument('--suffix', type=str, default='_N')
 parser.add_argument('--mask_root', type=str, default='./masks')
+parser.add_argument('--depth_root', type=str, default=None)
 parser.add_argument('--save_dir', type=str, default='./snapshots/default')
 parser.add_argument('--log_dir', type=str, default='./logs/default')
 parser.add_argument('--lr', type=float, default=2e-4)
@@ -81,10 +82,10 @@ mask_tf = transforms.Compose(
 print(args)
 
 masks = args.mask_root if args.random_masks else [(args.mask_root, '_objectmask.png')]
-dataset_train = DDDataset(args.root, size, crop=True, insuffixes = [args.suffix], masks=masks, train=True, random_masks=args.random_masks)
 
+datasets = [DDDataset(args.root, size, crop=True, insuffixes = [args.suffix], masks=masks, train=train_flag, random_masks=args.random_masks, depth_map=(args.depth_root, '_WO.exr'), auto_resize=not args.random_masks) for train_flag in [True, False]]
+dataset_train, dataset_val = datasets
 print('train size:', len(dataset_train))
-dataset_val = DDDataset(args.root, size, crop=True, insuffixes = [args.suffix], masks=masks, train=False, random_masks=args.random_masks)
 print('val size:', len(dataset_val))
 print('dataset shapes:')
 for tensor in dataset_train[0]:
@@ -95,7 +96,7 @@ iterator_train = iter(data.DataLoader(
     sampler=InfiniteSampler(len(dataset_train)),
     num_workers=args.n_threads))
 print(len(dataset_train))
-model = PConvUNet().to(device)
+model = PConvUNet(input_guides=1 if args.depth_root is not None else 0).to(device)
 
 if args.finetune:
     lr = args.lr_finetune
@@ -117,9 +118,14 @@ if args.resume:
 
 for i in tqdm(range(start_iter, args.max_iter)):
     model.train()
-
+    
     image, mask, gt = [x.to(device) for x in next(iterator_train)]
-    output, _ = model(image, mask)
+    if args.mask_root is not None:
+        guide = image[:,3:4,:,:]
+        image = image[:,0:3,:,:]
+        output, _ = model(image, mask, guide)
+    else:
+        output, _ = model(image, mask)
     loss_dict = criterion(image, mask, output, gt)
 
     loss = 0.0

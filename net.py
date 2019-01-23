@@ -95,72 +95,107 @@ class PartialConv(nn.Module):
 
 class PCBActiv(nn.Module):
     def __init__(self, in_ch, out_ch, bn=True, sample='none-3', activ='relu',
-                 conv_bias=False):
+                 conv_bias=False, guide_channels=0):
         super().__init__()
+        self.in_channels = in_ch
+        self.guide_channels = guide_channels
         if sample == 'down-5':
             self.conv = PartialConv(in_ch, out_ch, 5, 2, 2, bias=conv_bias)
+            if guide_channels > 0:
+                self.conv2 = nn.Conv2d(guide_channels, out_ch, 5, 2, 2, bias=conv_bias)
         elif sample == 'down-7':
             self.conv = PartialConv(in_ch, out_ch, 7, 2, 3, bias=conv_bias)
+            if guide_channels > 0:
+                self.conv2 = nn.Conv2d(guide_channels, out_ch, 7, 2, 3, bias=conv_bias)
         elif sample == 'down-3':
             self.conv = PartialConv(in_ch, out_ch, 3, 2, 1, bias=conv_bias)
+            if guide_channels > 0:
+                self.conv2 = nn.Conv2d(guide_channels, out_ch, 3, 2, 1, bias=conv_bias)
         else:
             self.conv = PartialConv(in_ch, out_ch, 3, 1, 1, bias=conv_bias)
+            if guide_channels > 0:
+                self.conv2 = nn.Conv2d(guide_channels, out_ch, 3, 1, 1, bias=conv_bias)
 
         if bn:
             self.bn = nn.BatchNorm2d(out_ch)
+            self.bn2 = nn.BatchNorm2d(out_ch)
         if activ == 'relu':
             self.activation = nn.ReLU()
         elif activ == 'leaky':
             self.activation = nn.LeakyReLU(negative_slope=0.2)
 
-    def forward(self, input, input_mask):
+    def forward(self, input, input_mask, guide=None):
         h, h_mask = self.conv(input, input_mask)
+        if guide is not None:
+            d = self.conv2(guide)
         if hasattr(self, 'bn'):
             h = self.bn(h)
+            if guide is not None:
+                d = self.bn2(d)
         if hasattr(self, 'activation'):
             h = self.activation(h)
-        return h, h_mask
+            if guide is not None:
+                d = self.activation(d)
+        if guide is not None:
+            return h, h_mask, d
+        else:
+            return h, h_mask
 
 
 class PConvUNet(nn.Module):
-    def __init__(self, layer_size=7, input_channels=3, upsampling_mode='nearest'):
+    def __init__(self, layer_size=7, input_channels=3, upsampling_mode='nearest', input_guides=0):
         super().__init__()
+        use_guides = input_guides > 0
+        self.use_guides = use_guides
+        self.num_guides = input_guides
         self.freeze_enc_bn = False
         self.upsampling_mode = upsampling_mode
         self.layer_size = layer_size
-        self.enc_1 = PCBActiv(input_channels, 64, bn=False, sample='down-7')
-        self.enc_2 = PCBActiv(64, 128, sample='down-5')
-        self.enc_3 = PCBActiv(128, 256, sample='down-5')
-        self.enc_4 = PCBActiv(256, 512, sample='down-3')
+        self.enc_1 = PCBActiv(input_channels, 64, bn=False, sample='down-7', guide_channels=input_guides)
+        self.enc_2 = PCBActiv(64, 128, sample='down-5', guide_channels = 64 if use_guides else 0)
+        self.enc_3 = PCBActiv(128, 256, sample='down-5', guide_channels = 128 if use_guides else 0)
+        self.enc_4 = PCBActiv(256, 512, sample='down-3', guide_channels = 256 if use_guides else 0)
         for i in range(4, self.layer_size):
             name = 'enc_{:d}'.format(i + 1)
-            setattr(self, name, PCBActiv(512, 512, sample='down-3'))
+            setattr(self, name, PCBActiv(512, 512, sample='down-3', guide_channels = 512 if use_guides else 0))
 
         for i in range(4, self.layer_size):
             name = 'dec_{:d}'.format(i + 1)
-            setattr(self, name, PCBActiv(512 + 512, 512, activ='leaky'))
-        self.dec_4 = PCBActiv(512 + 256, 256, activ='leaky')
-        self.dec_3 = PCBActiv(256 + 128, 128, activ='leaky')
-        self.dec_2 = PCBActiv(128 + 64, 64, activ='leaky')
-        self.dec_1 = PCBActiv(64 + input_channels, input_channels,
+            setattr(self, name, PCBActiv(512 + 512 + (512 if use_guides else 0), 512, activ='leaky'))
+        self.dec_4 = PCBActiv(512 + 256 + (256 if use_guides else 0), 256, activ='leaky')
+        self.dec_3 = PCBActiv(256 + 128 + (128 if use_guides else 0), 128, activ='leaky')
+        self.dec_2 = PCBActiv(128 + 64 + (64 if use_guides else 0), 64, activ='leaky')
+        self.dec_1 = PCBActiv(64 + input_channels + input_guides, input_channels,
                               bn=False, activ=None, conv_bias=True)
 
-    def forward(self, input, input_mask):
+    def forward(self, input, input_mask, input_guide=None):
+        if self.num_guides > 0:
+            if input_guide is None:
+                raise ValueError("expected guide input to forward pass")
+            
         h_dict = {}  # for the output of enc_N
         h_mask_dict = {}  # for the output of enc_N
-
-        h_dict['h_0'], h_mask_dict['h_0'] = input, input_mask
+        if self.use_guides:
+            d_dict = {} #for the guides output by enc_N
+            d_dict['h_0'] = input_guide
+        h_dict['h_0'], h_mask_dict['h_0']  = input, input_mask
 
         h_key_prev = 'h_0'
         for i in range(1, self.layer_size + 1):
             l_key = 'enc_{:d}'.format(i)
             h_key = 'h_{:d}'.format(i)
-            h_dict[h_key], h_mask_dict[h_key] = getattr(self, l_key)(
-                h_dict[h_key_prev], h_mask_dict[h_key_prev])
+            if self.use_guides:
+                h_dict[h_key], h_mask_dict[h_key], d_dict[h_key] = getattr(self, l_key)(
+                    h_dict[h_key_prev], h_mask_dict[h_key_prev], d_dict[h_key_prev])
+            else:
+                h_dict[h_key], h_mask_dict[h_key] = getattr(self, l_key)(
+                    h_dict[h_key_prev], h_mask_dict[h_key_prev])
             h_key_prev = h_key
 
         h_key = 'h_{:d}'.format(self.layer_size)
         h, h_mask = h_dict[h_key], h_mask_dict[h_key]
+        if self.use_guides:
+            d = d_dict[h_key]
 
         # concat upsampled output of h_enc_N-1 and dec_N+1, then do dec_N
         # (exception)
@@ -174,9 +209,17 @@ class PConvUNet(nn.Module):
             h = F.interpolate(h, scale_factor=2, mode=self.upsampling_mode)
             h_mask = F.interpolate(
                 h_mask, scale_factor=2, mode='nearest')
-
-            h = torch.cat([h, h_dict[enc_h_key]], dim=1)
-            h_mask = torch.cat([h_mask, h_mask_dict[enc_h_key]], dim=1)
+            
+            if self.use_guides:
+                h = torch.cat([h, h_dict[enc_h_key], d_dict[enc_h_key]], dim=1)
+                n = h.shape[1] - h_mask.shape[1] - h_mask_dict[enc_h_key].shape[1]
+                #print('h_mask before concat:',h_mask.shape)
+                h_mask = torch.cat([h_mask, h_mask_dict[enc_h_key], h_mask[:,0:1,:,:].repeat(1, n, 1, 1)], dim=1)
+                #print('h:', h.shape)
+                #print('h_mask:', h_mask.shape)
+            else:
+                h = torch.cat([h, h_dict[enc_h_key]], dim=1)
+                h_mask = torch.cat([h_mask, h_mask_dict[enc_h_key]], dim=1)
             h, h_mask = getattr(self, dec_l_key)(h, h_mask)
 
         return h, h_mask
